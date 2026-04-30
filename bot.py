@@ -1,8 +1,46 @@
 import yfinance as yf
 import pandas as pd
+import requests
 from sklearn.ensemble import RandomForestClassifier
 
-# OPTION CHAIN (SIMULATED USING VOLUME)
+# =========================
+# 🔔 TELEGRAM SETTINGS
+# =========================
+TELEGRAM_TOKEN = "YOUR_BOT_TOKEN"
+CHAT_ID = "YOUR_CHAT_ID"
+
+last_signal = None
+
+def send_telegram(msg):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+    except:
+        pass
+
+
+def notify_signal(signal_data):
+    global last_signal
+
+    signal = signal_data['signal']
+
+    # Only send new signal (avoid spam)
+    if signal != last_signal and signal != "NO TRADE":
+        message = f"""
+🔥 SIGNAL ALERT
+
+Signal: {signal}
+Price: {signal_data['price']}
+Win %: {signal_data['probability']}
+OI Bias: {signal_data['oi_bias']}
+"""
+        send_telegram(message)
+        last_signal = signal
+
+
+# =========================
+# 📊 OPTION BIAS (SIMULATED)
+# =========================
 def option_chain_bias(df):
     recent = df.tail(5)
 
@@ -12,7 +50,9 @@ def option_chain_bias(df):
     return "BULLISH" if up_volume > down_volume else "BEARISH"
 
 
-# AI MODEL
+# =========================
+# 🤖 AI MODEL
+# =========================
 def train_ai(df):
     df['target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     df = df.dropna()
@@ -27,46 +67,70 @@ def train_ai(df):
 
 
 def ai_prediction(model, latest):
-    prob = model.predict_proba([[latest['Close'], latest['Volume']]])[0][1]
-    return round(prob * 100, 2)
+    try:
+        prob = model.predict_proba([[latest['Close'], latest['Volume']]])[0][1]
+        return round(prob * 100, 2)
+    except:
+        return 50
 
 
-# MAIN FUNCTION
+# =========================
+# 🚀 MAIN FUNCTION
+# =========================
 def get_latest_signal():
-    df = yf.download("^NSEI", period="1d", interval="5m")
+    try:
+        df = yf.download("^NSEI", period="1d", interval="5m")
 
-    if df.empty:
-        return {"signal": "NO DATA", "probability": 0, "price": 0}
+        # Safety check
+        if df.empty:
+            return {"signal": "NO DATA", "probability": 0, "price": 0, "oi_bias": "NA"}
 
-    # Fix MultiIndex
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        # Fix multi-index issue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
-    # Indicators
-    df['ema'] = df['Close'].ewm(span=20).mean()
+        # Indicator
+        df['ema'] = df['Close'].ewm(span=20).mean()
 
-    # AI Model
-    model = train_ai(df)
+        # Train AI
+        model = train_ai(df)
 
-    latest = df.iloc[-1]
+        # Latest data
+        latest = df.iloc[-1]
 
-    close_price = float(df['Close'].iloc[-1])
-    ema = float(df['ema'].iloc[-1])
+        close_price = float(df['Close'].iloc[-1])
+        ema_value = float(df['ema'].iloc[-1])
 
-    ai_prob = ai_prediction(model, latest)
-    oi_bias = option_chain_bias(df)
+        ai_prob = ai_prediction(model, latest)
+        oi_bias = option_chain_bias(df)
 
-    # FINAL LOGIC
-    if close_price > ema and oi_bias == "BULLISH" and ai_prob > 60:
-        signal = "🔥 CE BUY"
-    elif close_price < ema and oi_bias == "BEARISH" and ai_prob > 60:
-        signal = "🔥 PE BUY"
-    else:
-        signal = "NO TRADE"
+        # =========================
+        # 🎯 FINAL SIGNAL LOGIC
+        # =========================
+        if close_price > ema_value and oi_bias == "BULLISH" and ai_prob > 60:
+            signal = "🔥 CE BUY"
+        elif close_price < ema_value and oi_bias == "BEARISH" and ai_prob > 60:
+            signal = "🔥 PE BUY"
+        else:
+            signal = "NO TRADE"
 
-    return {
-        "signal": signal,
-        "probability": ai_prob,
-        "price": close_price,
-        "oi_bias": oi_bias
-    }
+        result = {
+            "signal": signal,
+            "probability": ai_prob,
+            "price": close_price,
+            "oi_bias": oi_bias
+        }
+
+        # 🔔 Send Telegram Alert
+        notify_signal(result)
+
+        return result
+
+    except Exception as e:
+        return {
+            "signal": "ERROR",
+            "probability": 0,
+            "price": 0,
+            "oi_bias": "NA",
+            "error": str(e)
+        }
