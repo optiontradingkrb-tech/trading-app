@@ -4,7 +4,7 @@ import pandas as pd
 def get_latest_signal():
     df = yf.download("^NSEI", period="1d", interval="5m")
 
-    # Safety check
+    # Safety
     if df.empty:
         return {
             "signal": "NO DATA",
@@ -12,16 +12,22 @@ def get_latest_signal():
             "price": 0
         }
 
+    # Flatten columns (VERY IMPORTANT FIX)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     # EMA
     df['ema'] = df['Close'].ewm(span=20).mean()
 
-    # Latest row properly extract
-    latest = df.iloc[-1]
+    # Extract latest safely
+    latest_close = df['Close'].iloc[-1]
+    latest_ema = df['ema'].iloc[-1]
 
-    close_price = float(latest['Close'])
-    ema_value = float(latest['ema'])
+    # Convert safely
+    close_price = float(latest_close)
+    ema_value = float(latest_ema)
 
-    # Safe comparison
+    # Signal
     if close_price > ema_value:
         signal = "CE BUY"
     else:
