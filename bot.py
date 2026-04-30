@@ -2,9 +2,13 @@ import yfinance as yf
 import pandas as pd
 import requests
 import os
-import time
+import numpy as np
 from dotenv import load_dotenv
 from sklearn.ensemble import RandomForestClassifier
+
+# LSTM
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
 load_dotenv()
 
@@ -12,7 +16,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 last_signal = None
-
 
 # =========================
 # 🔔 TELEGRAM
@@ -25,43 +28,41 @@ def send_telegram(msg):
         pass
 
 
-def notify_signal(signal_data):
+def notify_signal(data):
     global last_signal
 
-    if signal_data['signal'] != last_signal and signal_data['signal'] != "NO TRADE":
-
+    if data['signal'] != last_signal and data['signal'] != "NO TRADE":
         msg = f"""
 🔥 SIGNAL ALERT
 
-Signal: {signal_data['signal']}
-Strike: {signal_data['strike']}
+Signal: {data['signal']}
+Strike: {data['strike']}
 
-SL: {signal_data['sl']}
-Target: {signal_data['target']}
-Trailing SL: {signal_data['trailing_sl']}
+SL: {data['sl']}
+Target: {data['target']}
+Trailing SL: {data['trailing_sl']}
 
-Hold: {signal_data['hold_time']}
+Hold: {data['hold_time']}
 
-Win %: {signal_data['probability']}
-OI Bias: {signal_data['oi_bias']}
-Backtest Acc: {signal_data['backtest_acc']}%
+Win %: {data['probability']}
+OI Bias: {data['oi_bias']}
+SMC: {data['smc']}
+Backtest: {data['backtest_acc']}%
 """
         send_telegram(msg)
-        last_signal = signal_data['signal']
+        last_signal = data['signal']
 
 
 # =========================
-# 📊 REAL ATM OI
+# 📊 NSE OI (ATM)
 # =========================
 def get_atm_oi():
     try:
         url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
-
         headers = {"User-Agent": "Mozilla/5.0"}
 
         session = requests.Session()
         session.get("https://www.nseindia.com", headers=headers)
-
         data = session.get(url, headers=headers).json()
 
         underlying = data['records']['underlyingValue']
@@ -69,10 +70,9 @@ def get_atm_oi():
 
         for item in data['records']['data']:
             if item['strikePrice'] == atm:
-                ce_oi = item['CE']['openInterest']
-                pe_oi = item['PE']['openInterest']
-
-                return "BULLISH" if pe_oi > ce_oi else "BEARISH"
+                ce = item['CE']['openInterest']
+                pe = item['PE']['openInterest']
+                return "BULLISH" if pe > ce else "BEARISH"
 
         return "NEUTRAL"
     except:
@@ -80,7 +80,7 @@ def get_atm_oi():
 
 
 # =========================
-# 🧠 SMART MONEY (LIQUIDITY)
+# 🧠 SMART MONEY
 # =========================
 def smart_money(df):
     df['high_break'] = df['High'] > df['High'].shift(1)
@@ -89,35 +89,31 @@ def smart_money(df):
     last = df.iloc[-1]
 
     if last['high_break'] and last['Close'] < last['High']:
-        return "SELL_SIDE_LIQUIDITY"
-
+        return "SELL_LIQUIDITY"
     elif last['low_break'] and last['Close'] > last['Low']:
-        return "BUY_SIDE_LIQUIDITY"
+        return "BUY_LIQUIDITY"
 
     return "NONE"
 
 
 # =========================
-# 📈 PULLBACK STRATEGY
+# 📈 PULLBACK
 # =========================
 def pullback(df):
     df['ema'] = df['Close'].ewm(span=20).mean()
-
     last = df.iloc[-1]
 
     if last['Close'] > last['ema']:
-        return "BUY_PULLBACK"
-
+        return "BUY"
     elif last['Close'] < last['ema']:
-        return "SELL_PULLBACK"
-
+        return "SELL"
     return "NONE"
 
 
 # =========================
-# 🤖 AI MODEL
+# 🤖 RANDOM AI
 # =========================
-def train_ai(df):
+def train_rf(df):
     df['target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     df = df.dropna()
 
@@ -126,16 +122,48 @@ def train_ai(df):
 
     model = RandomForestClassifier(n_estimators=50)
     model.fit(X, y)
-
     return model
 
 
-def ai_prob(model, latest):
+def rf_prob(model, latest):
     try:
         p = model.predict_proba([[latest['Close'], latest['Volume']]])[0][1]
         return round(p * 100, 2)
     except:
         return 50
+
+
+# =========================
+# 🧠 LSTM MODEL
+# =========================
+def train_lstm(df):
+    data = df['Close'].values.reshape(-1,1)
+
+    X, y = [], []
+    for i in range(10, len(data)):
+        X.append(data[i-10:i])
+        y.append(data[i])
+
+    X, y = np.array(X), np.array(y)
+
+    model = Sequential()
+    model.add(LSTM(50, input_shape=(X.shape[1],1)))
+    model.add(Dense(1))
+
+    model.compile(optimizer='adam', loss='mse')
+    model.fit(X, y, epochs=2, verbose=0)
+
+    return model
+
+
+def lstm_bias(df):
+    try:
+        model = train_lstm(df)
+        last = df['Close'].values[-10:].reshape(1,10,1)
+        pred = model.predict(last, verbose=0)[0][0]
+        return "BULLISH" if pred > df['Close'].iloc[-1] else "BEARISH"
+    except:
+        return "NEUTRAL"
 
 
 # =========================
@@ -145,16 +173,16 @@ def backtest(df):
     wins = 0
     total = 0
 
-    for i in range(len(df) - 1):
-        if df['Close'].iloc[i] < df['Close'].iloc[i + 1]:
+    for i in range(len(df)-1):
+        if df['Close'].iloc[i] < df['Close'].iloc[i+1]:
             wins += 1
         total += 1
 
-    return round((wins / total) * 100, 2) if total > 0 else 0
+    return round((wins/total)*100,2) if total else 0
 
 
 # =========================
-# 🚀 MAIN FUNCTION
+# 🚀 MAIN
 # =========================
 def get_latest_signal():
     try:
@@ -164,64 +192,61 @@ def get_latest_signal():
             df.columns = df.columns.get_level_values(0)
 
         latest = df.iloc[-1]
-        close_price = float(latest['Close'])
+        price = float(latest['Close'])
 
-        # Components
-        oi_bias = get_atm_oi()
+        oi = get_atm_oi()
         smc = smart_money(df)
         pb = pullback(df)
 
-        model = train_ai(df)
-        probability = ai_prob(model, latest)
+        rf_model = train_rf(df)
+        prob = rf_prob(rf_model, latest)
+
+        lstm = lstm_bias(df)
         acc = backtest(df)
 
         # =========================
-        # 🎯 FINAL LOGIC
+        # 🎯 SIGNAL
         # =========================
-        if pb == "BUY_PULLBACK" and oi_bias == "BULLISH" and probability > 60:
+        if pb == "BUY" and oi == "BULLISH" and lstm == "BULLISH" and prob > 60:
             signal = "🔥 CE BUY"
-
-        elif pb == "SELL_PULLBACK" and oi_bias == "BEARISH" and probability > 60:
+        elif pb == "SELL" and oi == "BEARISH" and lstm == "BEARISH" and prob > 60:
             signal = "🔥 PE BUY"
-
         else:
             signal = "NO TRADE"
 
         # =========================
-        # 🎯 SL / TARGET
+        # 🎯 SL TARGET
         # =========================
-        strike = round(close_price / 50) * 50
+        strike = round(price/50)*50
 
         if signal == "🔥 CE BUY":
             sl = strike - 50
             target = strike + 100
-            trailing = strike if close_price > strike + 30 else sl
-
+            trailing = strike if price > strike + 30 else sl
         elif signal == "🔥 PE BUY":
             sl = strike + 50
             target = strike - 100
-            trailing = strike if close_price < strike - 30 else sl
-
+            trailing = strike if price < strike - 30 else sl
         else:
             sl = target = trailing = 0
 
         result = {
             "signal": signal,
-            "price": close_price,
+            "price": price,
             "strike": strike,
             "sl": sl,
             "target": target,
             "trailing_sl": trailing,
             "hold_time": "10 min",
-            "probability": probability,
-            "oi_bias": oi_bias,
+            "probability": prob,
+            "oi_bias": oi,
             "smc": smc,
             "pullback": pb,
+            "lstm": lstm,
             "backtest_acc": acc
         }
 
         notify_signal(result)
-
         return result
 
     except Exception as e:
