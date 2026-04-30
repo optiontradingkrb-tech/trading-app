@@ -4,11 +4,25 @@ import pandas as pd
 def get_latest_signal():
     df = yf.download("^NSEI", period="1d", interval="5m")
 
+    # Safety check
+    if df.empty:
+        return {
+            "signal": "NO DATA",
+            "probability": 0,
+            "price": 0
+        }
+
+    # EMA
     df['ema'] = df['Close'].ewm(span=20).mean()
 
+    # Latest row properly extract
     latest = df.iloc[-1]
 
-    if latest['Close'] > latest['ema']:
+    close_price = float(latest['Close'])
+    ema_value = float(latest['ema'])
+
+    # Safe comparison
+    if close_price > ema_value:
         signal = "CE BUY"
     else:
         signal = "PE BUY"
@@ -16,5 +30,5 @@ def get_latest_signal():
     return {
         "signal": signal,
         "probability": 65,
-        "price": float(latest['Close'])
+        "price": close_price
     }
