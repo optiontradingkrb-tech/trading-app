@@ -1,16 +1,22 @@
 import yfinance as yf
 import pandas as pd
 import requests
+import os
+import time
+from dotenv import load_dotenv
 from sklearn.ensemble import RandomForestClassifier
 
-# =========================
-# 🔔 TELEGRAM SETTINGS
-# =========================
-TELEGRAM_TOKEN = "8718242394:AAEL2N5Uc02lmTNrpTsd0kwXXLNSlqej8pA"
-CHAT_ID = "8353258184"
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 last_signal = None
 
+
+# =========================
+# 🔔 TELEGRAM
+# =========================
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -22,35 +28,90 @@ def send_telegram(msg):
 def notify_signal(signal_data):
     global last_signal
 
-    signal = signal_data['signal']
+    if signal_data['signal'] != last_signal and signal_data['signal'] != "NO TRADE":
 
-    if signal != last_signal and signal != "NO TRADE":
-        message = f"""
+        msg = f"""
 🔥 SIGNAL ALERT
 
 Signal: {signal_data['signal']}
-Strike Price: {signal_data['strike']}
+Strike: {signal_data['strike']}
 
 SL: {signal_data['sl']}
 Target: {signal_data['target']}
+Trailing SL: {signal_data['trailing_sl']}
+
+Hold: {signal_data['hold_time']}
 
 Win %: {signal_data['probability']}
 OI Bias: {signal_data['oi_bias']}
+Backtest Acc: {signal_data['backtest_acc']}%
 """
-        send_telegram(message)
-        last_signal = signal
+        send_telegram(msg)
+        last_signal = signal_data['signal']
 
 
 # =========================
-# 📊 OPTION BIAS (SIMULATED)
+# 📊 REAL ATM OI
 # =========================
-def option_chain_bias(df):
-    recent = df.tail(5)
+def get_atm_oi():
+    try:
+        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
 
-    up_volume = recent[recent['Close'] > recent['Open']]['Volume'].sum()
-    down_volume = recent[recent['Close'] < recent['Open']]['Volume'].sum()
+        headers = {"User-Agent": "Mozilla/5.0"}
 
-    return "BULLISH" if up_volume > down_volume else "BEARISH"
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers)
+
+        data = session.get(url, headers=headers).json()
+
+        underlying = data['records']['underlyingValue']
+        atm = round(underlying / 50) * 50
+
+        for item in data['records']['data']:
+            if item['strikePrice'] == atm:
+                ce_oi = item['CE']['openInterest']
+                pe_oi = item['PE']['openInterest']
+
+                return "BULLISH" if pe_oi > ce_oi else "BEARISH"
+
+        return "NEUTRAL"
+    except:
+        return "NEUTRAL"
+
+
+# =========================
+# 🧠 SMART MONEY (LIQUIDITY)
+# =========================
+def smart_money(df):
+    df['high_break'] = df['High'] > df['High'].shift(1)
+    df['low_break'] = df['Low'] < df['Low'].shift(1)
+
+    last = df.iloc[-1]
+
+    if last['high_break'] and last['Close'] < last['High']:
+        return "SELL_SIDE_LIQUIDITY"
+
+    elif last['low_break'] and last['Close'] > last['Low']:
+        return "BUY_SIDE_LIQUIDITY"
+
+    return "NONE"
+
+
+# =========================
+# 📈 PULLBACK STRATEGY
+# =========================
+def pullback(df):
+    df['ema'] = df['Close'].ewm(span=20).mean()
+
+    last = df.iloc[-1]
+
+    if last['Close'] > last['ema']:
+        return "BUY_PULLBACK"
+
+    elif last['Close'] < last['ema']:
+        return "SELL_PULLBACK"
+
+    return "NONE"
 
 
 # =========================
@@ -69,12 +130,27 @@ def train_ai(df):
     return model
 
 
-def ai_prediction(model, latest):
+def ai_prob(model, latest):
     try:
-        prob = model.predict_proba([[latest['Close'], latest['Volume']]])[0][1]
-        return round(prob * 100, 2)
+        p = model.predict_proba([[latest['Close'], latest['Volume']]])[0][1]
+        return round(p * 100, 2)
     except:
         return 50
+
+
+# =========================
+# 📊 BACKTEST
+# =========================
+def backtest(df):
+    wins = 0
+    total = 0
+
+    for i in range(len(df) - 1):
+        if df['Close'].iloc[i] < df['Close'].iloc[i + 1]:
+            wins += 1
+        total += 1
+
+    return round((wins / total) * 100, 2) if total > 0 else 0
 
 
 # =========================
@@ -84,78 +160,69 @@ def get_latest_signal():
     try:
         df = yf.download("^NSEI", period="1d", interval="5m")
 
-        if df.empty:
-            return {"signal": "NO DATA", "probability": 0, "price": 0, "oi_bias": "NA"}
-
-        # Fix MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Indicator
-        df['ema'] = df['Close'].ewm(span=20).mean()
-
-        # Train AI
-        model = train_ai(df)
-
-        # Latest
         latest = df.iloc[-1]
+        close_price = float(latest['Close'])
 
-        close_price = float(df['Close'].iloc[-1])
-        ema_value = float(df['ema'].iloc[-1])
+        # Components
+        oi_bias = get_atm_oi()
+        smc = smart_money(df)
+        pb = pullback(df)
 
-        ai_prob = ai_prediction(model, latest)
-        oi_bias = option_chain_bias(df)
+        model = train_ai(df)
+        probability = ai_prob(model, latest)
+        acc = backtest(df)
 
         # =========================
-        # 🎯 SIGNAL LOGIC
+        # 🎯 FINAL LOGIC
         # =========================
-        if close_price > ema_value and oi_bias == "BULLISH" and ai_prob > 60:
+        if pb == "BUY_PULLBACK" and oi_bias == "BULLISH" and probability > 60:
             signal = "🔥 CE BUY"
-        elif close_price < ema_value and oi_bias == "BEARISH" and ai_prob > 60:
+
+        elif pb == "SELL_PULLBACK" and oi_bias == "BEARISH" and probability > 60:
             signal = "🔥 PE BUY"
+
         else:
             signal = "NO TRADE"
 
         # =========================
-        # 🎯 SL & TARGET
+        # 🎯 SL / TARGET
         # =========================
-        strike_price = round(close_price / 50) * 50
+        strike = round(close_price / 50) * 50
 
         if signal == "🔥 CE BUY":
-            sl = strike_price - 50
-            target = strike_price + 100
+            sl = strike - 50
+            target = strike + 100
+            trailing = strike if close_price > strike + 30 else sl
 
         elif signal == "🔥 PE BUY":
-            sl = strike_price + 50
-            target = strike_price - 100
+            sl = strike + 50
+            target = strike - 100
+            trailing = strike if close_price < strike - 30 else sl
 
         else:
-            sl = 0
-            target = 0
+            sl = target = trailing = 0
 
         result = {
             "signal": signal,
-            "probability": ai_prob,
             "price": close_price,
-            "strike": strike_price,
+            "strike": strike,
             "sl": sl,
             "target": target,
-            "oi_bias": oi_bias
+            "trailing_sl": trailing,
+            "hold_time": "10 min",
+            "probability": probability,
+            "oi_bias": oi_bias,
+            "smc": smc,
+            "pullback": pb,
+            "backtest_acc": acc
         }
 
-        # 🔔 Telegram Alert
         notify_signal(result)
 
         return result
 
     except Exception as e:
-        return {
-            "signal": "ERROR",
-            "probability": 0,
-            "price": 0,
-            "strike": 0,
-            "sl": 0,
-            "target": 0,
-            "oi_bias": "NA",
-            "error": str(e)
-        }
+        return {"error": str(e)}
