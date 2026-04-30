@@ -1,7 +1,4 @@
 fastapi
 uvicorn
-streamlit
 pandas
-ta
-requests
-scikit-learn
+yfinance
