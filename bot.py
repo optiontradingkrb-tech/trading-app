@@ -6,8 +6,8 @@ from sklearn.ensemble import RandomForestClassifier
 # =========================
 # 🔔 TELEGRAM SETTINGS
 # =========================
-TELEGRAM_TOKEN = "YOUR_BOT_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+TELEGRAM_TOKEN = "8718242394:AAEL2N5Uc02lmTNrpTsd0kwXXLNSlqej8pA"
+CHAT_ID = "8353258184"
 
 last_signal = None
 
@@ -24,13 +24,16 @@ def notify_signal(signal_data):
 
     signal = signal_data['signal']
 
-    # Only send new signal (avoid spam)
     if signal != last_signal and signal != "NO TRADE":
         message = f"""
 🔥 SIGNAL ALERT
 
-Signal: {signal}
-Price: {signal_data['price']}
+Signal: {signal_data['signal']}
+Strike Price: {signal_data['strike']}
+
+SL: {signal_data['sl']}
+Target: {signal_data['target']}
+
 Win %: {signal_data['probability']}
 OI Bias: {signal_data['oi_bias']}
 """
@@ -81,11 +84,10 @@ def get_latest_signal():
     try:
         df = yf.download("^NSEI", period="1d", interval="5m")
 
-        # Safety check
         if df.empty:
             return {"signal": "NO DATA", "probability": 0, "price": 0, "oi_bias": "NA"}
 
-        # Fix multi-index issue
+        # Fix MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -95,7 +97,7 @@ def get_latest_signal():
         # Train AI
         model = train_ai(df)
 
-        # Latest data
+        # Latest
         latest = df.iloc[-1]
 
         close_price = float(df['Close'].iloc[-1])
@@ -105,7 +107,7 @@ def get_latest_signal():
         oi_bias = option_chain_bias(df)
 
         # =========================
-        # 🎯 FINAL SIGNAL LOGIC
+        # 🎯 SIGNAL LOGIC
         # =========================
         if close_price > ema_value and oi_bias == "BULLISH" and ai_prob > 60:
             signal = "🔥 CE BUY"
@@ -114,14 +116,34 @@ def get_latest_signal():
         else:
             signal = "NO TRADE"
 
+        # =========================
+        # 🎯 SL & TARGET
+        # =========================
+        strike_price = round(close_price / 50) * 50
+
+        if signal == "🔥 CE BUY":
+            sl = strike_price - 50
+            target = strike_price + 100
+
+        elif signal == "🔥 PE BUY":
+            sl = strike_price + 50
+            target = strike_price - 100
+
+        else:
+            sl = 0
+            target = 0
+
         result = {
             "signal": signal,
             "probability": ai_prob,
             "price": close_price,
+            "strike": strike_price,
+            "sl": sl,
+            "target": target,
             "oi_bias": oi_bias
         }
 
-        # 🔔 Send Telegram Alert
+        # 🔔 Telegram Alert
         notify_signal(result)
 
         return result
@@ -131,6 +153,9 @@ def get_latest_signal():
             "signal": "ERROR",
             "probability": 0,
             "price": 0,
+            "strike": 0,
+            "sl": 0,
+            "target": 0,
             "oi_bias": "NA",
             "error": str(e)
         }
