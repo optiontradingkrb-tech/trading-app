@@ -6,3 +6,9 @@ scikit-learn
 streamlit
 requests
 tensorflow
+flask
+requests
+pandas
+numpy
+python-dotenv
+tensorflow
