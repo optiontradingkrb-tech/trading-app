@@ -3,6 +3,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+import os
 from datetime import datetime
 
 st.set_page_config(page_title="AI Options Trader", layout="wide", page_icon="📈")
@@ -16,7 +17,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-BACKEND_URL = st.secrets.get("BACKEND_URL", os.getenv("BACKEND_URL", "http://localhost:5000"))
+# Get backend URL from environment variable (set in Render)
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
 
 # Auto-refresh every 30 seconds
 if 'last_refresh' not in st.session_state:
@@ -33,7 +35,8 @@ def fetch_signal():
         resp = requests.get(f"{BACKEND_URL}/", timeout=8)
         resp.raise_for_status()
         return resp.json()
-    except:
+    except Exception as e:
+        st.error(f"Fetch error: {e}")
         return None
 
 data = fetch_signal()
@@ -117,6 +120,6 @@ if data and "error" not in data:
 
 else:
     st.error("❌ Failed to fetch data from backend. Check API or network.")
-    st.info("Backend URL: " + BACKEND_URL)
+    st.info(f"Backend URL: {BACKEND_URL}")
     if st.button("🔄 Retry Now"):
         st.rerun()
