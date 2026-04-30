@@ -1,0 +1,7 @@
+# requirements.txt
+flask
+requests
+pandas
+numpy
+gunicorn
+streamlit
